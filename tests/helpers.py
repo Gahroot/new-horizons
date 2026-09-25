@@ -34,6 +34,8 @@ def requires_docker(obj):
 class TempDirCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="horizons-test-")).resolve()
+        # mkdtemp is 0700; on Linux the sandbox's non-root user must be able to read topic folders.
+        os.chmod(self.tmp, 0o755)
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def write(self, rel: str, text: str) -> Path:

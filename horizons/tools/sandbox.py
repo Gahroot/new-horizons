@@ -105,6 +105,10 @@ class DockerSandbox:
         self.rt = runtime
         self.root = topic_root.resolve()
         self.workspace = workspace.resolve() if workspace else None
+        # On Linux, bind-mount permissions are the host's: the container's `nobody` user needs o+rx on the topic dir.
+        if sys.platform.startswith("linux") and self.root.stat().st_mode & 0o005 != 0o005:
+            raise SandboxUnavailable(f"the sandbox runs as an unprivileged user that cannot read {self.root}. "
+                                     f"Make the topic folder readable: chmod o+rx {self.root}")
         # Subscription tokens must never be readable by generated code.
         self.auth_dir = default_auth_file().resolve().parent
         if self.auth_dir == self.root:

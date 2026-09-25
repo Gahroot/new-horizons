@@ -27,6 +27,13 @@ class UnsafeLocalGateTests(TempDirCase):
         with self.assertRaises(SandboxUnavailable):
             make_sandbox(Runtime(sandbox="unsafe-local"), self.tmp, None, accept_unsafe_local=False)
 
+    def test_unreadable_topic_fails_closed_on_linux(self):
+        self.tmp.chmod(0o700)
+        with mock.patch("horizons.tools.sandbox.docker_available", return_value=(True, "")), \
+                mock.patch("horizons.tools.sandbox.sys.platform", "linux"):
+            with self.assertRaisesRegex(SandboxUnavailable, "chmod o\\+rx"):
+                DockerSandbox(Runtime(), self.tmp)
+
     def test_argv_has_hardening_flags(self):
         ev = self.write("evaluate.py", TINY_EVALUATOR)
         sb = DockerSandbox.__new__(DockerSandbox)  # build argv without needing a daemon
