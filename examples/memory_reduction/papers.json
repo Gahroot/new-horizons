@@ -1,0 +1,42 @@
+[
+  {
+    "id": "demo:streaming-nn",
+    "source": "fixture",
+    "title": "Streaming nearest neighbour computation without materialised distance matrices (demo fixture)",
+    "abstract": "DEMO FIXTURE, NOT A REAL PAPER. We show that all-nearest-neighbour distances can be computed row by row, keeping only a running minimum per point. Peak memory drops from quadratic to linear in the number of points while results are unchanged.",
+    "authors": ["Demo Author"],
+    "year": 2024,
+    "venue": "New Horizons demo fixture",
+    "url": ""
+  },
+  {
+    "id": "demo:struct-of-arrays",
+    "source": "fixture",
+    "title": "Struct-of-arrays layouts for numeric Python code (demo fixture)",
+    "abstract": "DEMO FIXTURE, NOT A REAL PAPER. Splitting coordinate tuples into separate arrays improves cache behaviour in compiled code. In pure Python the object overhead of the result container usually dominates, so layout changes alone rarely reduce peak memory.",
+    "authors": ["Demo Author"],
+    "year": 2023,
+    "venue": "New Horizons demo fixture",
+    "url": ""
+  },
+  {
+    "id": "demo:typed-arrays",
+    "source": "fixture",
+    "title": "Typed arrays versus lists of floats: memory accounting in CPython (demo fixture)",
+    "abstract": "DEMO FIXTURE, NOT A REAL PAPER. A list of Python floats costs about 32 bytes per element, while array('d') stores 8 bytes per element. Converting dense matrices to typed arrays reduces peak memory by roughly 75 percent.",
+    "authors": ["Demo Author"],
+    "year": 2022,
+    "venue": "New Horizons demo fixture",
+    "url": ""
+  },
+  {
+    "id": "demo:gpu-knn",
+    "source": "fixture",
+    "title": "GPU tiled k-nearest-neighbour search for large point clouds (demo fixture)",
+    "abstract": "DEMO FIXTURE, NOT A REAL PAPER. Tiled distance computation on GPUs keeps only a tile of the distance matrix in device memory, enabling nearest neighbour search over millions of points with bounded VRAM.",
+    "authors": ["Demo Author"],
+    "year": 2024,
+    "venue": "New Horizons demo fixture",
+    "url": ""
+  }
+]

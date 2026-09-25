@@ -1,0 +1,100 @@
+{
+  "_comment": "Deterministic offline LLM for the demo. Each task's responses are consumed in order. This proves the engine's plumbing (refute -> pivot -> error -> refine -> replicate -> success); it is not real research.",
+  "deconstruct_queries": [
+    {"queries": ["all nearest neighbour distances memory", "distance matrix streaming computation", "python float list memory overhead"]}
+  ],
+  "boundary_map": [
+    {
+      "summary": "The baseline's memory is dominated by the materialised n x n matrix of Python floats. Known remedies either shrink each element (typed arrays) or avoid storing the matrix at all (streaming row minima). Layout changes alone are reported not to help in pure Python.",
+      "known_approaches": [
+        {"approach": "Store the dense matrix in typed arrays instead of lists of floats", "citations": ["demo:typed-arrays"]},
+        {"approach": "Tile or stream the distance computation so only part of the matrix exists at once", "citations": ["demo:streaming-nn", "demo:gpu-knn"]},
+        {"approach": "Struct-of-arrays coordinate layout", "citations": ["demo:struct-of-arrays", "arxiv:0000.00000"]}
+      ],
+      "gaps": ["No measurement yet of how much of the peak comes from the matrix versus coordinate objects"],
+      "promising_directions": [
+        {"direction": "Keep only a running minimum per point while computing distances", "citations": ["demo:streaming-nn"]},
+        {"direction": "Change coordinate layout to struct-of-arrays", "citations": ["demo:struct-of-arrays"]}
+      ]
+    }
+  ],
+  "hypothesize": [
+    {
+      "hypotheses": [
+        {
+          "statement": "Splitting the points into separate x, y and z coordinate lists (struct-of-arrays) will cut peak memory by at least half",
+          "rationale": "Layout changes improve locality and might reduce tuple unpacking temporaries.",
+          "test_kind": "python_sandbox",
+          "falsification": "peak_memory_mb stays above 50% of baseline",
+          "expected_effect": "-50% peak memory",
+          "citations": ["demo:struct-of-arrays"],
+          "alternatives": ["Any saving could come from fewer temporary tuples rather than the layout itself"],
+          "readiness": "testable"
+        },
+        {
+          "statement": "A GPU tiled kernel will keep distance-matrix memory bounded for this workload",
+          "rationale": "Tiling bounds memory to one tile of the matrix.",
+          "test_kind": "python_sandbox",
+          "falsification": "Tiled GPU run uses more device memory than a single tile",
+          "expected_effect": "bounded VRAM",
+          "citations": ["demo:gpu-knn"],
+          "readiness": "needs_resources",
+          "missing": "a CUDA GPU and GPU-enabled sandbox image"
+        },
+        {
+          "statement": "Computing only the upper triangle of the distance matrix will halve peak memory",
+          "rationale": "The matrix is symmetric so half of it is redundant.",
+          "test_kind": "python_sandbox",
+          "falsification": "peak_memory_mb stays above 50% of baseline",
+          "expected_effect": "about -50% peak memory",
+          "citations": [],
+          "readiness": "testable"
+        }
+      ]
+    },
+    {
+      "hypotheses": [
+        {
+          "statement": "Streaming the computation row by row and keeping only a running minimum per point removes the quadratic matrix and cuts peak memory by far more than half",
+          "rationale": "The boundary map shows the n x n matrix dominates memory; the result only needs one number per point.",
+          "test_kind": "python_sandbox",
+          "falsification": "peak_memory_mb stays above 50% of baseline or any distance changes",
+          "expected_effect": "-90% or more peak memory",
+          "citations": ["demo:streaming-nn"],
+          "alternatives": ["tracemalloc might not capture all allocations"],
+          "readiness": "testable"
+        },
+        {
+          "statement": "Storing each matrix row in array('d') instead of a list of floats will reduce peak memory by about 75 percent",
+          "rationale": "Typed arrays store 8 bytes per element instead of a pointer plus a float object.",
+          "test_kind": "python_sandbox",
+          "falsification": "peak_memory_mb stays above 50% of baseline",
+          "expected_effect": "-75% peak memory",
+          "citations": ["demo:typed-arrays"],
+          "readiness": "testable"
+        }
+      ]
+    }
+  ],
+  "judge": [
+    {"ranking": [{"index": 1, "score": 6.5, "reason": "cheap to test"}, {"index": 2, "score": 6.0, "reason": "saves at most half"}]},
+    {"ranking": [{"index": 1, "score": 9.0, "reason": "removes the dominant allocation entirely"}, {"index": 2, "score": 7.0, "reason": "still quadratic"}]}
+  ],
+  "implement": [
+    "```python\nimport math\n\n\ndef nearest_neighbor_distances(points):\n    xs = [p[0] for p in points]\n    ys = [p[1] for p in points]\n    zs = [p[2] for p in points]\n    n = len(points)\n    matrix = [[0.0] * n for _ in range(n)]\n    for i in range(n):\n        xi, yi, zi = xs[i], ys[i], zs[i]\n        row = matrix[i]\n        for j in range(n):\n            row[j] = math.sqrt((xi - xs[j]) ** 2 + (yi - ys[j]) ** 2 + (zi - zs[j]) ** 2)\n    return [min(matrix[i][j] for j in range(n) if j != i) for i in range(n)]\n```",
+    "```python\nimport math\n\n\ndef nearest_neighbor_distances(points):\n    result = []\n    for i, (xi, yi, zi) in enumerate(points):\n        best = math.inf\n        for j, (xj, yj, zj) in enumerate(points):\n            if i != j:\n                d = (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2\n                if d < best:\n                    best = d\n        result.append(math.sqrt(bets))\n    return result\n```",
+    "```python\nimport math\n\n\ndef nearest_neighbor_distances(points):\n    result = []\n    for i, (xi, yi, zi) in enumerate(points):\n        best = math.inf\n        for j, (xj, yj, zj) in enumerate(points):\n            if i != j:\n                d = (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2\n                if d < best:\n                    best = d\n        result.append(math.sqrt(best))\n    return result\n```"
+  ],
+  "reflect": [
+    {
+      "explanation": "The coordinate layout was never the bottleneck: the n x n matrix of float objects still exists, so peak memory barely moved.",
+      "lessons": [
+        {"category": "experiment", "text": "Changing the coordinate layout does not reduce peak memory while the full n x n matrix is still materialised."},
+        {"category": "analysis", "text": "Target the dominant allocation (the distance matrix) rather than secondary objects."}
+      ]
+    }
+  ],
+  "classify_evidence": [
+    {"judgements": []}
+  ]
+}

@@ -1,0 +1,33 @@
+# Literature-only topic: no code is executed. The engine forms hypotheses, searches Semantic Scholar
+# and arXiv, and a model classifies abstracts as supporting / challenging each hypothesis. Every
+# supports/challenges judgement must quote the abstract verbatim; the quote is checked in code and
+# dropped if it isn't really there. Metrics are counts of verified evidence, never model opinions.
+#
+#   ANTHROPIC_API_KEY=... horizons run examples/literature_question/topic.toml
+
+[topic]
+name = "sparse-attention-evidence"
+goal = "Find a claim about sparse or linear attention for long-context language models that published abstracts clearly support, with little contrary evidence"
+context = "Scope: transformer language models, context lengths above 8k tokens. Evidence is judged from abstracts only."
+
+[tools]
+allowed = ["literature"]
+
+[tools.literature]
+sources = ["semantic_scholar", "arxiv"]
+max_papers = 15
+
+[validation]
+metric = "evidence_balance"          # (supporting - challenging) / (supporting + challenging)
+direction = "maximize"
+target = { absolute = 0.6 }
+guards = [{ metric = "supporting_papers", op = ">=", value = 3 }]
+replications = 2                     # the classification is re-done independently and must agree
+
+[budget]
+max_iterations = 4
+max_llm_calls = 40
+max_sandbox_runs = 1
+max_wall_clock_min = 15
+patience = 3
+max_pivots = 2

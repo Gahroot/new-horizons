@@ -1,0 +1,47 @@
+# Topic Template: reduce peak memory of a nearest-neighbour routine without changing its results.
+#
+#   Offline demo (no API key):   horizons run examples/memory_reduction/topic.toml --llm scripted
+#   Real research loop:          ANTHROPIC_API_KEY=... horizons run examples/memory_reduction/topic.toml
+
+[topic]
+name = "memory-reduction"
+goal = "Reduce peak memory of the baseline nearest-neighbour distance routine by at least 50% without changing its results"
+context = """
+The baseline computes, for 700 random 3-D points, the distance to each point's nearest neighbour by
+materialising the full n x n distance matrix. Pure Python, standard library only. Correctness is
+checked against an independent reference to 1e-9 relative tolerance.
+"""
+
+[tools]
+allowed = ["literature", "python_sandbox"]
+
+[tools.literature]
+sources = ["semantic_scholar", "arxiv"]
+max_papers = 12
+fixture = "papers.json"          # local demo papers, used offline and by the scripted LLM
+
+[tools.python_sandbox]
+baseline = "baseline.py"
+evaluator = "evaluate.py"
+image = "python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0"
+timeout_s = 60
+memory = "512m"
+cpus = 1.0
+
+[validation]
+metric = "peak_memory_mb"
+direction = "minimize"
+target = { relative_to_baseline = -0.5 }
+guards = [{ metric = "correct", op = "==", value = 1 }]
+replications = 3
+
+[budget]
+max_iterations = 6
+max_llm_calls = 60
+max_sandbox_runs = 30
+max_wall_clock_min = 20
+patience = 3
+max_pivots = 3
+
+[llm]
+scripted_file = "scripted_llm.json"   # used only with --llm scripted

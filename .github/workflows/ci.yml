@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Pull the pinned sandbox image
+        run: docker pull "$(python -c 'from horizons.template import DEFAULT_IMAGE; print(DEFAULT_IMAGE)')"
+      - name: Byte-compile
+        run: python -m compileall -q horizons tests
+      - name: Unit tests (Docker sandbox tests included)
+        run: python -m unittest discover -s tests -v
