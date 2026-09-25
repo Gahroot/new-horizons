@@ -97,6 +97,7 @@ class DockerSandboxTests(TempDirCase):
         self.assertRegex(r.error, "unreachable|OSError|Errno")
 
     def test_evaluator_and_topic_are_read_only(self):
+        self.ev.chmod(0o666)  # so only the read-only mount (not file ownership) can block the write
         r = self.run_candidate("def value():\n    open('/topic/evaluate.py', 'a').write('x')\n    return 1\n")
         self.assertEqual(r.status, "errored")
         self.assertIn("Read-only", r.error)
