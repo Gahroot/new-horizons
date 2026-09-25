@@ -1,0 +1,83 @@
+# Topic Template: sub-1-bit compression of mixture-of-experts "expert" weights.
+#
+# Real-world aim: run GLM-5.3-Flash (320B total / 18B active MoE) on ~2016 consumer hardware
+# (16 GB RAM + 6 GB Pascal GPU, e.g. GTX 1060, SATA SSD). ~17 GB is usable, so experts must reach
+# ~0.5 bits per weight (~20 GB) with cold experts streamed from the SSD. The open question is how
+# much quality survives. This topic researches that on a small, honest stand-in: simulated expert
+# layers compressed to <= 0.5 bits per weight, scored on held-out activations.
+#
+# Round 2: baseline.py is the winner of round 1 (run-dff729ce, 0.8 bits, error 0.93 -> 0.28).
+#
+#   horizons run topics/sub1bit_moe/topic.toml --llm chatgpt
+
+[topic]
+name = "sub1bit-moe-experts"
+goal = "Cut the output error of 0.5-bit low-rank binary compression of MoE expert weights by at least 30% versus the calibration-aware sign-flipping baseline"
+context = """
+Why: routed experts hold almost all of an MoE model's parameters, so squeezing them below 1 bit per
+weight is what would let GLM-5.3-Flash fit on a 10-year-old PC. NanoQuant (arXiv 2602.06694) shows
+low-rank binary factorisation with Hessian-aware ADMM initialisation reaching 0.55-1 bit on dense
+models; QMoE shows expert weights compress unusually well. Neither has been combined for this case.
+
+Setup (a stand-in, not the real model): the evaluator builds 3 random 128x128 expert matrices per run
+(the same matrices for a candidate and its paired baseline run, so luck cancels out)
+with realistic structure (low-rank component, heavy input-channel scales, a few outlier channels) and
+matching activations with outlier channels. candidate.py must define
+
+    compress(W, X_calib, max_bits) -> dict
+
+W is a list of 128 rows (lists of 128 floats), X_calib is 256 calibration activation rows of length
+128, max_bits is the bit budget for this matrix. Return exactly this format:
+
+    {"U": m rows of r values in {-1, +1},  "V": n rows of r values in {-1, +1},
+     "a": m floats, "b": n floats, "c": r floats}
+
+The evaluator itself rebuilds W_hat = diag(a) @ U @ diag(c) @ V.T @ diag(b), rounding a, b, c to
+float16, and charges r*(m+n) + 16*(m+n+r) bits. So only the choice of rank, signs and scales matters;
+nothing else can carry information. With 0.5 bits per weight the rank is at most 15, and the fixed
+float16 scales a and b already use half the budget.
+
+The baseline is already strong: greedy sign-only power iteration, then 5 passes of calibration-aware
+coordinate descent (flip a sign of U or V only if it lowers calibration output error, refit c and a
+by least squares). It never uses b (input-channel scales) and never re-splits the budget between
+rank and scales. Beating it by 30% needs a genuinely better idea.
+Metric: mean relative output error ||X_test (W - W_hat)^T||^2 / ||X_test W^T||^2 over the 3 matrices,
+where X_test is fresh held-out activations never shown to compress(). Pure Python standard library only
+(no numpy), 1 CPU, 300 s limit per run: keep the algorithms lean.
+"""
+
+[tools]
+allowed = ["literature", "python_sandbox"]
+
+[tools.literature]
+sources = ["semantic_scholar", "arxiv", "openalex"]
+max_papers = 20
+
+[tools.python_sandbox]
+baseline = "baseline.py"
+evaluator = "evaluate.py"
+image = "python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0"
+timeout_s = 300
+memory = "1g"
+cpus = 1.0
+
+[validation]
+metric = "output_error"
+direction = "minimize"
+target = { relative_to_baseline = -0.3 }
+guards = [
+  { metric = "valid", op = "==", value = 1 },
+  { metric = "bits_per_weight", op = "<=", value = 0.5 },
+]
+replications = 3
+paired = true         # each run is compared with the baseline on the same random layers
+
+[budget]
+max_iterations = 10
+max_llm_calls = 120
+max_sandbox_runs = 60
+max_wall_clock_min = 90
+patience = 4
+max_pivots = 3
+max_refines = 2
+hypotheses_per_round = 3

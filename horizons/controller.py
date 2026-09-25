@@ -138,6 +138,11 @@ class Controller:
             if self.debug:
                 traceback.print_exc()
             status = self._finish("failed", f"{type(e).__name__}: {e}", done=False)
+        lit = self.ctx.tools.created("literature")
+        if lit is not None and not self.offline:
+            self.state["literature_coverage"] = lit.coverage()
+            self._checkpoint()
+            self._log("literature", f"coverage: {self.state['literature_coverage']}")
         path = write_report(self.kb, self.run_id, self.spec, self.ctx.run_dir)
         self._log("report", f"written to {path}")
         return status
@@ -158,7 +163,9 @@ class Controller:
                 ctx.sandbox(tool)
         if spec.python_sandbox:
             code = spec.python_sandbox.baseline.read_text(encoding="utf-8")
-            runs = [executor.run_python(ctx, code, "baseline") for _ in range(spec.validation.replications)]
+            paired = spec.validation.paired
+            runs = [executor.run_python(ctx, code, "baseline", seed=executor.new_seed() if paired else None)
+                    for _ in range(spec.validation.replications)]
             bad = [r for r in runs if r.status != "ok"]
             if bad:
                 raise RunError(f"the unmodified baseline failed in the evaluator ({bad[0].status}: {bad[0].error}). "
@@ -174,7 +181,7 @@ class Controller:
                 self._log("baseline", f"warning: baseline itself fails a guard ({why})")
             mean = stats.mean(samples)
             self.state["baseline"] = {"samples": samples, "mean": mean, "metrics": avg,
-                                      "experiment_id": runs[0].experiment_id}
+                                      "experiment_id": runs[0].experiment_id, "code": code}
             self.state["best"] = {"label": "baseline", "code": code, "metrics": avg, "value": mean,
                                   "experiment_id": runs[0].experiment_id, "hypothesis_id": None,
                                   "summary": f"baseline {spec.validation.metric}={mean:g}"}
@@ -182,6 +189,14 @@ class Controller:
             self._log("baseline", f"{spec.validation.metric} = {mean:g} over {len(samples)} run(s)"
                       + (f"; target {target:g}" if target is not None else ""))
         self.state["phase"] = "deconstruct"
+
+    def _paired_baseline(self, seed: int, hid: str) -> float | None:
+        """Run the unmodified baseline on ``seed``; its metric is the fair reference for that seed."""
+        base = self.state.get("baseline") or {}
+        code = base.get("code") or self.spec.python_sandbox.baseline.read_text(encoding="utf-8")
+        r = executor.run_python(self.ctx, code, "paired-baseline", hypothesis_id=hid, seed=seed)
+        # Guards are not applied: the baseline may legitimately fail one (the baseline phase only warns).
+        return ev.metric_value(self.spec.validation, r.metrics) if r.status == "ok" else None
 
     def _phase_deconstruct(self) -> None:
         refresh = self.state["redeconstructs"] > 0
@@ -217,8 +232,18 @@ class Controller:
         base_mean = base.get("mean")
         best = st.get("best") or {}
 
-        res = executor.execute(ctx, hyp, st, cur["failed"], cur["refines"])
+        paired = spec.validation.paired and hyp["test_kind"] == "python_sandbox"
+        seed = executor.new_seed() if paired else None
+        res = executor.execute(ctx, hyp, st, cur["failed"], cur["refines"], seed=seed)
+        pairs: list[float | None] = []
         step, reason = ev.screen(spec, res.status, res.metrics, res.error, base_mean)
+        if paired and step != "errored":
+            # Only a run that could count (ran, has the metric, passed guards) is worth a baseline run.
+            pairs.append(self._paired_baseline(seed, hyp["id"]))
+            if pairs[0] is None:
+                step, reason = "errored", "the baseline failed on this seed, so the run has no fair comparison"
+            else:
+                step, reason = ev.screen(spec, res.status, res.metrics, res.error, pairs[0])
         runs = [(res.status, res.metrics)]
         if step == "errored":
             verdict = ev.Verdict("errored", reason)
@@ -226,10 +251,14 @@ class Controller:
             if step == "replicate" and spec.validation.replications > 1:
                 self._log("evaluate", f"{hyp['id']} passed first run; replicating x{spec.validation.replications - 1}")
                 for _ in range(spec.validation.replications - 1):
-                    r = executor.replicate(ctx, hyp, res)
+                    rseed = executor.new_seed() if paired else None
+                    r = executor.replicate(ctx, hyp, res, seed=rseed)
                     runs.append((r.status, r.metrics))
+                    if paired:
+                        pairs.append(self._paired_baseline(rseed, hyp["id"]) if r.status == "ok" else None)
             prior = [p["p"] for p in st["pvalues"]]
-            verdict = ev.judge(spec, runs, base_samples, best.get("value"), prior)
+            verdict = ev.judge(spec, runs, base_samples, best.get("value"), prior,
+                               paired_baselines=pairs if paired else None)
             if step == "refuted" and verdict.outcome == "supported":  # screen and judge disagree -> be conservative
                 verdict.outcome = "refuted"
             if verdict.p_value is not None and spec.validation.kind == "significance":
@@ -254,10 +283,17 @@ class Controller:
         if hyp.get("parent_id"):
             graph.link(self.kb, self.run_id, hyp["id"], hyp["parent_id"], "derived_from", 1.0, "built on best program")
 
-        lessons, expl = reflector.reflect(ctx, hyp, verdict.outcome, verdict.reason, res.log)
+        evidence = verdict.reason
+        if verdict.samples:
+            evidence += (f"; measured {spec.validation.metric}: {', '.join(f'{s:.4g}' for s in verdict.samples)}"
+                         + (f" vs baseline {base_mean:.4g}" if base_mean is not None else ""))
+        if verdict.paired_baselines:
+            evidence += f"; baseline on the same seeds: {', '.join(f'{s:.4g}' for s in verdict.paired_baselines)}"
+        lessons, expl = reflector.reflect(ctx, hyp, verdict.outcome, evidence, res.log)
         self.kb.update_hypothesis(hyp["id"], status=verdict.outcome,
                                   outcome={**verdict.to_dict(), "experiment_id": res.experiment_id,
-                                           "explanation": expl, "attempts": cur["refines"] + 1})
+                                           "explanation": expl, "attempts": cur["refines"] + 1,
+                                           "fidelity": res.payload.get("fidelity")})
         decision = reflector.decide(verdict.outcome, cur["refines"], spec.budget.max_refines)
         self._log("reflect", f"{decision}" + (f" - lesson: {lessons[0][:160]}" if lessons else ""))
 
@@ -265,7 +301,8 @@ class Controller:
             fid = self.kb.add_finding(self.run_id, "breakthrough",
                                       f"{hyp['statement'][:300]} ({verdict.reason})",
                                       {"verdict": verdict.to_dict(), "baseline_mean": base_mean,
-                                       "metrics": res.metrics}, hypothesis_id=hyp["id"],
+                                       "metrics": res.metrics, "fidelity": res.payload.get("fidelity")},
+                                      hypothesis_id=hyp["id"],
                                       experiment_id=res.experiment_id, topic_name=spec.name)
             graph.link(self.kb, self.run_id, fid, hyp["id"], "supports", 1.0, verdict.reason)
             st["success_hid"] = hyp["id"]

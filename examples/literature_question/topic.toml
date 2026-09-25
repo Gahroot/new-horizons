@@ -1,5 +1,5 @@
-# Literature-only topic: no code is executed. The engine forms hypotheses, searches Semantic Scholar
-# and arXiv, and a model classifies abstracts as supporting / challenging each hypothesis. Every
+# Literature-only topic: no code is executed. The engine forms hypotheses, searches Semantic Scholar,
+# arXiv and OpenAlex, and a model classifies abstracts as supporting / challenging each hypothesis. Every
 # supports/challenges judgement must quote the abstract verbatim; the quote is checked in code and
 # dropped if it isn't really there. Metrics are counts of verified evidence, never model opinions.
 #
@@ -14,7 +14,7 @@ context = "Scope: transformer language models, context lengths above 8k tokens. 
 allowed = ["literature"]
 
 [tools.literature]
-sources = ["semantic_scholar", "arxiv"]
+sources = ["semantic_scholar", "arxiv", "openalex"]
 max_papers = 15
 
 [validation]

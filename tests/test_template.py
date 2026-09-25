@@ -62,6 +62,17 @@ class TemplateTests(TempDirCase):
         with self.assertRaisesRegex(TemplateError, "sign"):
             self.load(TINY_TOPIC.replace("target = { absolute = 10 }", "target = { relative_to_baseline = -0.5 }"))
 
+    def test_paired_flag(self):
+        spec = self.load(TINY_TOPIC.replace("replications = 2", "replications = 2\npaired = true"))
+        self.assertTrue(spec.validation.paired)
+        self.assertIn("same seed", spec.validation.describe())
+        self.assertFalse(self.load(TINY_TOPIC).validation.paired)
+        with self.assertRaisesRegex(TemplateError, "true or false"):
+            self.load(TINY_TOPIC.replace("replications = 2", 'replications = 2\npaired = "yes"'))
+        lit = (EXAMPLES / "literature_question" / "topic.toml").read_text()
+        with self.assertRaisesRegex(TemplateError, "needs python_sandbox"):
+            self.load(lit.replace("replications = 2", "replications = 2\npaired = true", 1))
+
     def test_significance_needs_enough_replications(self):
         text = TINY_TOPIC.replace('direction = "maximize"', 'direction = "maximize"\nkind = "significance"')
         with self.assertRaisesRegex(TemplateError, "replications >= 4"):

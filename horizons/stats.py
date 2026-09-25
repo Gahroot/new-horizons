@@ -58,6 +58,37 @@ def permutation_test(treatment: Sequence[float], control: Sequence[float], *, al
     return (hits + 1) / (n_resamples + 1)
 
 
+def paired_permutation_test(diffs: Sequence[float], *, alternative: str = "greater",
+                            n_resamples: int = 10_000, seed: int = 0) -> float:
+    """Sign-flip test for paired differences (treatment - control on the same unit).
+
+    Under the null each difference is equally likely to have either sign. Exact
+    when there are at most 2**14 sign patterns, otherwise Monte Carlo with +1.
+    """
+    d = [float(x) for x in diffs]
+    if not d:
+        return 1.0
+    observed = mean(d)
+    eps = 1e-12 * max(1.0, abs(observed))
+
+    def extreme(m: float) -> bool:
+        if alternative == "greater":
+            return m >= observed - eps
+        if alternative == "less":
+            return m <= observed + eps
+        return abs(m) >= abs(observed) - eps
+
+    n = len(d)
+    if n <= 14:
+        hits = 0
+        for signs in itertools.product((1.0, -1.0), repeat=n):
+            hits += extreme(sum(s * x for s, x in zip(signs, d)) / n)
+        return hits / 2 ** n
+    rng = random.Random(seed)
+    hits = sum(extreme(sum(x if rng.random() < 0.5 else -x for x in d) / n) for _ in range(n_resamples))
+    return (hits + 1) / (n_resamples + 1)
+
+
 def bootstrap_ci(treatment: Sequence[float], control: Sequence[float] | None = None, *, level: float = 0.95,
                  n_resamples: int = 5_000, seed: int = 0) -> tuple[float, float]:
     """Percentile bootstrap CI for mean(treatment) (- mean(control) if given)."""

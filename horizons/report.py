@@ -69,10 +69,21 @@ def build_report(kb: KB, run_id: str, spec: TopicSpec) -> str:
                  + (f" vs baseline {_num(base.get('mean'))}" if base else ""))
         if base.get("mean"):
             L.append(f"- Change vs baseline: {(vd.get('value', 0) - base['mean']) / abs(base['mean']):+.1%}")
+        pb = vd.get("paired_baselines") or []
+        if pb:
+            L.append(f"- Paired comparison: the baseline scored {', '.join(_num(x) for x in pb)} on the same seeds; "
+                     f"the value above is seed-adjusted (baseline mean × average candidate/baseline ratio on the same seed)")
         if vd.get("p_value") is not None:
-            L.append(f"- Permutation test p = {_num(vd['p_value'])}, Holm-adjusted p = {_num(vd.get('p_adjusted'))}")
+            test = "Paired sign-flip test" if pb else "Permutation test"
+            L.append(f"- {test} p = {_num(vd['p_value'])}, Holm-adjusted p = {_num(vd.get('p_adjusted'))}")
         if vd.get("ci"):
             L.append(f"- 95% bootstrap CI of the difference vs baseline: [{_num(vd['ci'][0])}, {_num(vd['ci'][1])}]")
+        fid = b["data"].get("fidelity", "absent")
+        if fid is True:
+            L.append("- Code review: the winning code was checked to implement the hypothesis it is credited to")
+        elif fid is None:
+            L.append("- Code review: **unchecked** (the reviewer's reply was unreadable); read the best program "
+                     "before crediting the hypothesis")
     else:
         L.append("**Target NOT met.** The numbers below are the best result so far, not a confirmed discovery.")
         L.append("")
@@ -109,12 +120,14 @@ def build_report(kb: KB, run_id: str, spec: TopicSpec) -> str:
     if tested:
         L.append("## Hypotheses tested")
         L.append("")
-        L.append(f"| # | ID | Tool | Outcome | {esc(v.metric, 40)} | Reason | Statement |")
-        L.append("|---|---|---|---|---|---|---|")
+        L.append(f"| # | ID | Tool | Outcome | {esc(v.metric, 40)} | Code matches idea | Reason | Statement |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        fid_label = {True: "yes", False: "no", None: "unchecked"}
         for h in tested:
             o = h["outcome"] or {}
+            fid = fid_label.get(o.get("fidelity", "absent"), "-") if h["test_kind"] == "python_sandbox" else "-"
             L.append(f"| {h['iteration']} | `{h['id']}` | {h['test_kind']} | **{h['status']}** | {_num(o.get('value'))} "
-                     f"| {esc(o.get('reason'), 160)} | {esc(h['statement'], 240)} |")
+                     f"| {fid} | {esc(o.get('reason'), 160)} | {esc(h['statement'], 240)} |")
         L.append("")
         ps = [(h["id"], (h["outcome"] or {}).get("p_value")) for h in tested]
         ps = [(i, p) for i, p in ps if p is not None]
@@ -170,6 +183,8 @@ def build_report(kb: KB, run_id: str, spec: TopicSpec) -> str:
     if run["llm"].startswith("scripted"):
         L.append("- This run used the **scripted** offline LLM: it proves the machinery works, not research quality.")
     L.append(f"- Papers retrieved: {len(kb.run_papers(run_id))}. Abstract-level evidence only; full texts were not read.")
+    if st.get("literature_coverage"):
+        L.append(f"- Literature sources: {esc(st['literature_coverage'], 600)}")
     L.append("")
     return "\n".join(L)
 

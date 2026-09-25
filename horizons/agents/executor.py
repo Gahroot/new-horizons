@@ -16,6 +16,7 @@ counting verified evidence.
 from __future__ import annotations
 
 import ast
+import difflib
 import hashlib
 import json
 import re
@@ -31,6 +32,7 @@ from horizons.llm import extract_code
 from horizons.tools.data_query import QueryError
 
 MAX_CODE_BYTES = 200_000
+MAX_DIFF_CHARS = 14_000
 
 
 @dataclass
@@ -60,22 +62,33 @@ def _save_logs(log_dir: Path, files: dict[str, str]) -> None:
         (log_dir / name).write_text(text, encoding="utf-8")
 
 
+def new_seed() -> int:
+    return secrets.randbits(62)
+
+
 def run_python(ctx: Ctx, code: str, purpose: str, *, hypothesis_id: str | None = None, attempt: int = 0,
-               parent_experiment_id: str | None = None) -> ExecResult:
-    """Run ``code`` as candidate.py through the user's evaluator."""
+               parent_experiment_id: str | None = None, seed: int | None = None) -> ExecResult:
+    """Run ``code`` as candidate.py through the user's evaluator.
+
+    ``seed`` is passed as HORIZONS_SEED so a seeded evaluator draws the same data for a candidate
+    and for its paired baseline run.
+    """
     cfg = ctx.spec.python_sandbox
     ctx.budget.charge_sandbox()
     attempt_dir, log_dir = _dirs(ctx)
     attempt_dir.mkdir(parents=True)
     (attempt_dir / "candidate.py").write_text(code, encoding="utf-8")
-    r = ctx.sandbox("python_sandbox").run(attempt_dir, cfg.evaluator)
-    _save_logs(log_dir, {"candidate.py": code, "stdout.txt": r.stdout, "stderr.txt": r.stderr})
+    env = {"HORIZONS_SEED": str(seed)} if seed is not None else None
+    r = ctx.sandbox("python_sandbox").run(attempt_dir, cfg.evaluator, env)
+    _save_logs(log_dir, {"candidate.py": code, "stdout.txt": r.stdout, "stderr.txt": r.stderr,
+                         **({"seed.txt": str(seed)} if seed is not None else {})})
     eid = ctx.kb.add_experiment(ctx.run_id, purpose, r.status, r.metrics, hypothesis_id=hypothesis_id,
                                 attempt=attempt, code_hash=code_hash(code), parent_experiment_id=parent_experiment_id,
                                 artifacts_dir=str(log_dir), error=r.error, duration_s=r.duration_s)
-    ctx.log("execute", f"{purpose} {eid}: {r.status} {r.error or _fmt(r.metrics)}")
+    ctx.log("execute", f"{purpose} {eid}: {r.status} {r.error or _fmt(r.metrics)}"
+            + (f" (seed {seed})" if seed is not None else ""))
     return ExecResult("python_sandbox", r.status, r.metrics, r.error, eid,
-                      {"code": code, "code_hash": code_hash(code)}, (r.stderr or r.stdout)[-3000:])
+                      {"code": code, "code_hash": code_hash(code), "seed": seed}, (r.stderr or r.stdout)[-3000:])
 
 
 def _fmt(m: dict[str, float]) -> str:
@@ -96,11 +109,12 @@ def _hyp_text(h: dict) -> str:
             f"Falsified if: {h.get('falsification', '')}\nExpected effect: {h.get('expected_effect', '')}")
 
 
-def execute(ctx: Ctx, hyp: dict, state: dict, failed: list[str], attempt: int) -> ExecResult:
+def execute(ctx: Ctx, hyp: dict, state: dict, failed: list[str], attempt: int,
+            seed: int | None = None) -> ExecResult:
     kind = hyp["test_kind"]
     ctx.tools.get(kind)  # allowlist gate, raises ToolNotAllowed
     if kind == "python_sandbox":
-        return _exec_python(ctx, hyp, state, failed, attempt)
+        return _exec_python(ctx, hyp, state, failed, attempt, seed)
     if kind == "data_query":
         return _exec_data(ctx, hyp, failed, attempt)
     if kind == "literature":
@@ -108,11 +122,11 @@ def execute(ctx: Ctx, hyp: dict, state: dict, failed: list[str], attempt: int) -
     raise ValueError(f"unknown test kind {kind!r}")
 
 
-def replicate(ctx: Ctx, hyp: dict, first: ExecResult) -> ExecResult:
+def replicate(ctx: Ctx, hyp: dict, first: ExecResult, seed: int | None = None) -> ExecResult:
     """Independent rerun of the same experiment (same code / query / papers)."""
     if first.kind == "python_sandbox":
         return run_python(ctx, first.payload["code"], "replication", hypothesis_id=hyp["id"],
-                          parent_experiment_id=first.experiment_id)
+                          parent_experiment_id=first.experiment_id, seed=seed)
     if first.kind == "data_query":
         return _run_query(ctx, hyp, first.payload["sql"], "replication", 0)
     return _classify(ctx, hyp, first.payload["papers"], "replication")
@@ -121,7 +135,30 @@ def replicate(ctx: Ctx, hyp: dict, first: ExecResult) -> ExecResult:
 # -- python sandbox ---------------------------------------------------------------
 
 
-def _exec_python(ctx: Ctx, hyp: dict, state: dict, failed: list[str], attempt: int) -> ExecResult:
+def code_diff(parent: str, candidate: str, cap: int = MAX_DIFF_CHARS) -> str:
+    diff = "".join(difflib.unified_diff(parent.splitlines(keepends=True), candidate.splitlines(keepends=True),
+                                        "parent.py", "candidate.py", n=3))
+    return diff if len(diff) <= cap else diff[:cap] + "\n... (diff truncated)\n"
+
+
+def check_fidelity(ctx: Ctx, hyp: dict, parent_code: str, code: str, parent_label: str) -> tuple[bool | None, str]:
+    """Ask a reviewer whether the code change implements the hypothesis' mechanism.
+
+    Returns (True, "") when it does, (False, what is missing) when it does not, and
+    (None, note) when the reply is unreadable. The review can only block a candidate,
+    never make one succeed: metrics still come from the user's evaluator.
+    """
+    out = ctx.ask_json("check_fidelity", hypothesis=untrusted(_hyp_text(hyp)),
+                       diff=code_diff(parent_code, code), parent_label=parent_label)
+    verdict = out.get("implements") if isinstance(out, dict) else None
+    if not isinstance(verdict, bool):
+        return None, "fidelity review reply was unreadable"
+    missing = str(out.get("missing") or "").strip()[:600]
+    return verdict, ("" if verdict else missing or "the change does not implement the hypothesis")
+
+
+def _exec_python(ctx: Ctx, hyp: dict, state: dict, failed: list[str], attempt: int,
+                 seed: int | None = None) -> ExecResult:
     best = state.get("best") or {}
     parent_code = best.get("code") or ctx.spec.python_sandbox.baseline.read_text(encoding="utf-8")
     out = ctx.ask_text(
@@ -140,14 +177,24 @@ def _exec_python(ctx: Ctx, hyp: dict, state: dict, failed: list[str], attempt: i
             compile(code, "candidate.py", "exec")  # parse only; nothing is executed on the host
         except SyntaxError as e:
             err = f"SyntaxError: {e.msg} (line {e.lineno})"
+    fidelity: bool | None = None
+    if not err:
+        fidelity, note = check_fidelity(ctx, hyp, parent_code, code, best.get("label", "baseline"))
+        if fidelity is False:
+            err = f"code does not implement the hypothesis: {note}"
+        elif fidelity is None:
+            ctx.log("execute", f"{hyp['id']}: {note}; running unchecked")
     if err:
         eid = ctx.kb.add_experiment(ctx.run_id, "candidate", "errored", {}, hypothesis_id=hyp["id"], attempt=attempt,
                                     code_hash=code_hash(code), parent_experiment_id=best.get("experiment_id"),
                                     error=err)
         ctx.log("execute", f"candidate {eid}: rejected before running: {err}")
-        return ExecResult("python_sandbox", "errored", {}, err, eid, {"code": code, "code_hash": code_hash(code)})
-    return run_python(ctx, code, "candidate", hypothesis_id=hyp["id"], attempt=attempt,
-                      parent_experiment_id=best.get("experiment_id"))
+        return ExecResult("python_sandbox", "errored", {}, err, eid,
+                          {"code": code, "code_hash": code_hash(code), "fidelity": fidelity})
+    res = run_python(ctx, code, "candidate", hypothesis_id=hyp["id"], attempt=attempt,
+                     parent_experiment_id=best.get("experiment_id"), seed=seed)
+    res.payload["fidelity"] = fidelity
+    return res
 
 
 # -- data query -------------------------------------------------------------------

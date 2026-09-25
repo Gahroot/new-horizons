@@ -85,6 +85,9 @@
     "```python\nimport math\n\n\ndef nearest_neighbor_distances(points):\n    result = []\n    for i, (xi, yi, zi) in enumerate(points):\n        best = math.inf\n        for j, (xj, yj, zj) in enumerate(points):\n            if i != j:\n                d = (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2\n                if d < best:\n                    best = d\n        result.append(math.sqrt(bets))\n    return result\n```",
     "```python\nimport math\n\n\ndef nearest_neighbor_distances(points):\n    result = []\n    for i, (xi, yi, zi) in enumerate(points):\n        best = math.inf\n        for j, (xj, yj, zj) in enumerate(points):\n            if i != j:\n                d = (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2\n                if d < best:\n                    best = d\n        result.append(math.sqrt(best))\n    return result\n```"
   ],
+  "check_fidelity": [
+    {"implements": true, "missing": ""}
+  ],
   "reflect": [
     {
       "explanation": "The coordinate layout was never the bottleneck: the n x n matrix of float objects still exists, so peak memory barely moved.",

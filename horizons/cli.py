@@ -30,7 +30,7 @@ context = "Background, constraints and known baselines."
 allowed = ["literature", "python_sandbox"]
 
 [tools.literature]
-sources = ["semantic_scholar", "arxiv"]
+sources = ["semantic_scholar", "arxiv", "openalex"]
 max_papers = 20
 
 [tools.python_sandbox]
@@ -153,7 +153,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check(True if os.environ.get("SEMANTIC_SCHOLAR_API_KEY") else None, "semantic scholar key",
            "present" if os.environ.get("SEMANTIC_SCHOLAR_API_KEY") else "absent (optional; lower rate limits)",
            "request a free key at semanticscholar.org/product/api and export SEMANTIC_SCHOLAR_API_KEY")
-    for host in ("api.semanticscholar.org", "export.arxiv.org"):
+    _check(True if os.environ.get("OPENALEX_API_KEY") else None, "openalex key",
+           "present" if os.environ.get("OPENALEX_API_KEY") else "absent (optional; about 100 searches a day without)",
+           "create a free key at openalex.org/settings/api and export OPENALEX_API_KEY")
+    for host in ("api.semanticscholar.org", "export.arxiv.org", "api.openalex.org"):
         try:
             socket.create_connection((host, 443), timeout=5).close()
             _check(True, f"network {host}", "reachable")

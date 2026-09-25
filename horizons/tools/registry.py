@@ -38,3 +38,7 @@ class ToolRegistry:
         if name not in self._instances:
             self._instances[name] = self._factories[name]()
         return self._instances[name]
+
+    def created(self, name: str) -> Any | None:
+        """The tool instance if it was used during this run, else None (never creates one)."""
+        return self._instances.get(name)

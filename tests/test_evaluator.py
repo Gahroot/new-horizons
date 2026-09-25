@@ -62,6 +62,44 @@ class JudgeTests(unittest.TestCase):
         self.assertIn("Holm", v2.reason)
 
 
+class PairedJudgeTests(unittest.TestCase):
+    """Paired mode judges each run against the baseline on the same seed (SPEC: -50% vs baseline)."""
+
+    base = [10.0, 10.0, 10.0]
+
+    def runs(self, *vals):
+        return [("ok", {"peak_memory_mb": v, "correct": 1}) for v in vals]
+
+    def test_hard_seeds_do_not_hide_a_real_win(self):
+        # Absolute values miss the 5.0 target, but each run halves the baseline on its own seed.
+        v = ev.judge(SPEC, self.runs(7.0, 8.0, 6.0), self.base, None, [], paired_baselines=[14.0, 16.0, 12.0])
+        self.assertEqual(v.outcome, "supported")
+        self.assertEqual(v.paired_baselines, [14.0, 16.0, 12.0])
+        self.assertAlmostEqual(v.value, 5.0)  # every run is exactly half its paired baseline
+        self.assertAlmostEqual(v.p_value, 0.125)
+        self.assertIn("same seed", v.reason)
+
+    def test_easy_seeds_do_not_create_a_fake_win(self):
+        # Absolute values beat the target, but the baseline did just as well on those seeds.
+        v = ev.judge(SPEC, self.runs(4.0, 4.5, 3.5), self.base, None, [], paired_baselines=[4.0, 4.4, 3.6])
+        self.assertEqual(v.outcome, "refuted")
+        unpaired = ev.judge(SPEC, self.runs(4.0, 4.5, 3.5), self.base, None, [])
+        self.assertEqual(unpaired.outcome, "supported")  # the lucky-draw failure the paired mode removes
+
+    def test_same_percentage_gain_counts_the_same_on_hard_and_easy_seeds(self):
+        hard = ev.judge(SPEC, self.runs(30.0), self.base, None, [], paired_baselines=[40.0])
+        easy = ev.judge(SPEC, self.runs(3.0), self.base, None, [], paired_baselines=[4.0])
+        self.assertAlmostEqual(hard.value, 7.5)
+        self.assertAlmostEqual(easy.value, 7.5)
+        self.assertEqual(ev.paired_diffs([1.0], [-2.0], 10.0), [3.0])  # non-positive baseline: plain difference
+
+    def test_missing_pair_blocks_success(self):
+        v = ev.judge(SPEC, self.runs(4.0, 4.0), self.base, None, [], paired_baselines=[10.0, None])
+        self.assertEqual(v.outcome, "inconclusive")
+        with self.assertRaises(ValueError):
+            ev.judge(SPEC, self.runs(4.0), self.base, None, [], paired_baselines=[])
+
+
 class ReflectDecisionTests(unittest.TestCase):
     def test_decide(self):
         self.assertEqual(decide("supported", 0, 2), "STOP")

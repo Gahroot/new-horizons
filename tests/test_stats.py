@@ -23,6 +23,20 @@ class StatsTests(unittest.TestCase):
         c = [r.gauss(0.0, 1) for _ in range(40)]
         self.assertGreater(stats.permutation_test(c, b, alternative="two-sided"), 0.05)
 
+    def test_paired_sign_flip_exact(self):
+        # 3 positive differences: only the all-plus pattern is as extreme -> p = 1/8
+        self.assertAlmostEqual(stats.paired_permutation_test([0.2, 0.1, 0.3], alternative="greater"), 0.125)
+        self.assertAlmostEqual(stats.paired_permutation_test([-0.2, -0.1, -0.3], alternative="less"), 0.125)
+        self.assertEqual(stats.paired_permutation_test([-0.2, -0.1, -0.3], alternative="greater"), 1.0)
+        self.assertEqual(stats.paired_permutation_test([]), 1.0)
+
+    def test_paired_sign_flip_monte_carlo(self):
+        r = random.Random(3)
+        shift = [0.5 + r.gauss(0, 0.2) for _ in range(30)]
+        self.assertLess(stats.paired_permutation_test(shift), 0.01)
+        noise = [r.gauss(0, 1) for _ in range(30)]
+        self.assertGreater(stats.paired_permutation_test(noise, alternative="two-sided"), 0.05)
+
     def test_bootstrap_ci_contains_true_difference(self):
         lo, hi = stats.bootstrap_ci([5, 6, 7, 6, 5], [1, 2, 3, 2, 1])
         self.assertLess(lo, 4)

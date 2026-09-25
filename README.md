@@ -91,7 +91,7 @@ context = "Optional background, constraints, known baselines."
 allowed = ["literature", "python_sandbox"]   # any of: literature, python_sandbox, data_query
 
 [tools.literature]
-sources = ["semantic_scholar", "arxiv"]
+sources = ["semantic_scholar", "arxiv", "openalex"]
 max_papers = 20
 # fixture = "papers.json"          # optional local papers (used offline / merged online)
 
@@ -118,6 +118,7 @@ guards = [{ metric = "correct", op = "==", value = 1 }]
 replications = 3                   # a win must pass on every rerun
 # kind = "significance"            # also require a permutation-test win vs baseline,
 # alpha = 0.05                     # Holm-corrected over every hypothesis tested in the run
+# paired = true                    # randomised evaluators: rerun the baseline on each candidate's seed
 
 [budget]
 max_iterations = 12
@@ -148,20 +149,29 @@ Your evaluator is a Python script run as `python -I evaluate.py` inside the sand
 3. Measure it and print one line: `MARKER + json.dumps({"metric": value, ...})`.
 
 Only the last marked line counts. Every value must be a finite number (booleans count as 0/1).
+
+**Randomised evaluators:** if your evaluator draws random data, make it read `HORIZONS_SEED` (an integer,
+set on every run in paired mode) and seed its generator from it, then set `paired = true` under `[validation]`. Each
+candidate run is then paired with a baseline run on the same seed: the target is checked per pair, the
+significance test uses the paired differences, and the reported value is seed-adjusted (baseline mean times
+the average candidate/baseline ratio, so a hard draw cannot make the same percentage gain look bigger). Without this, a
+lucky or unlucky draw can decide whether an idea passes. Paired mode costs one extra sandbox run per
+candidate run.
 See `examples/memory_reduction/evaluate.py`.
 
 ## How a run works
 
 1. **Baseline:** checks the sandbox, then runs your unmodified baseline `replications` times.
-2. **Deconstruct:** the model writes search queries → Semantic Scholar + arXiv → a *boundary map*
+2. **Deconstruct:** the model writes search queries → Semantic Scholar + arXiv + OpenAlex → a *boundary map*
    (known approaches, gaps, promising directions). Citations to papers that were not retrieved are
    removed and logged as a lesson.
 3. **Hypothesize:** several falsifiable hypotheses (statement, rationale, test tool, falsification
    criterion, alternatives), informed by recalled lessons. Near-duplicates of already-tested ideas are
    dropped. Ideas the allowed tools can't test are stored as `needs_resources` with what's missing.
    A judge prompt ranks the rest; one is tested.
-4. **Execute:** `python_sandbox` — the model rewrites the current best program and your evaluator
-   measures it. `data_query` — the model writes one read-only `SELECT`; your data evaluator scores the
+4. **Execute:** `python_sandbox` — the model rewrites the current best program; a reviewer call checks
+   that the code change really implements the hypothesis (a mismatch is sent back as a failed attempt),
+   then your evaluator measures it. `data_query` — the model writes one read-only `SELECT`; your data evaluator scores the
    rows. `literature` — the model labels papers as supporting or challenging; each label must quote the
    abstract word for word, and the quote is checked in code.
 5. **Evaluate (code only):** `errored` (crash, timeout, broken guard) → **REFINE** the experiment;
@@ -202,7 +212,12 @@ Every step is checkpointed, so `--resume` continues after a crash, Ctrl-C, or an
 - **VRAM:** measuring GPU memory needs a GPU host with the NVIDIA container toolkit (`gpus = "all"`).
   This was not tested here; the demo measures peak CPU heap via `tracemalloc`.
 - **Literature** is judged from abstracts only. Semantic Scholar's unauthenticated rate limits are low:
-  set `SEMANTIC_SCHOLAR_API_KEY` for heavier use. arXiv requests are spaced 3 seconds apart, as arXiv asks.
+  set `SEMANTIC_SCHOLAR_API_KEY` for heavier use. OpenAlex allows about 100 searches a day without a key;
+  set `OPENALEX_API_KEY` (free) for more. A source that refuses access is switched off for the rest of the
+  run with one message, and the report lists which sources actually answered. arXiv requests are spaced
+  3 seconds apart, as arXiv asks, and its query is loosened when nothing matches.
+- **The code-matches-idea review** is a model call: it can block a mismatched candidate, never make one
+  succeed. An unreadable review is marked "unchecked" in the report.
 - **Your own data** (LiDAR, historical records…) has to be exported into a SQLite file for `data_query`.
 - The embeddings are local feature hashing: good for duplicate detection and recall, not deep semantics.
 - **Subscription logins** reuse the public sign-in apps of Claude Code and the Codex CLI (as ezcoder

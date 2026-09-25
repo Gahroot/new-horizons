@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 KNOWN_TOOLS = ("literature", "python_sandbox", "data_query")
-KNOWN_SOURCES = ("semantic_scholar", "arxiv")
+KNOWN_SOURCES = ("semantic_scholar", "arxiv", "openalex")
 GUARD_OPS = ("==", "!=", "<", "<=", ">", ">=")
 SANDBOX_MODES = ("docker", "unsafe-local")
 # claude / chatgpt = subscription logins (`horizons login ...`); anthropic / openai = API keys.
@@ -97,6 +97,9 @@ class Validation:
     guards: tuple[Guard, ...] = ()
     replications: int = 3
     alpha: float = 0.05
+    # Seeded evaluators: every judged candidate run is paired with a baseline run on the same
+    # HORIZONS_SEED, and verdicts use the paired difference instead of comparing raw values.
+    paired: bool = False
 
     def describe(self) -> str:
         if self.target_relative is not None:
@@ -110,7 +113,10 @@ class Validation:
             s += f", p < {self.alpha} (Holm-corrected)"
         if self.guards:
             s += "; guards: " + ", ".join(g.describe() for g in self.guards)
-        return s + f"; replications: {self.replications}"
+        s += f"; replications: {self.replications}"
+        if self.paired:
+            s += " (each paired with a baseline run on the same seed)"
+        return s
 
 
 @dataclass(frozen=True)
@@ -345,7 +351,13 @@ def parse_topic(raw: dict, root: Path, path: Path | None = None) -> TopicSpec:
         )
 
     v = _table(raw, "validation", "validation", required=True)
-    _no_unknown(v, {"metric", "direction", "kind", "target", "guards", "replications", "alpha"}, "validation")
+    _no_unknown(v, {"metric", "direction", "kind", "target", "guards", "replications", "alpha", "paired"},
+                "validation")
+    paired = v.get("paired", False)
+    if not isinstance(paired, bool):
+        raise TemplateError("[validation] paired must be true or false")
+    if paired and py is None:
+        raise TemplateError("[validation] paired needs python_sandbox (the baseline is rerun on each seed)")
     metric = _str(v, "metric", "validation", required=True)
     direction = _str(v, "direction", "validation", "maximize")
     if direction not in ("minimize", "maximize"):
@@ -397,6 +409,7 @@ def parse_topic(raw: dict, root: Path, path: Path | None = None) -> TopicSpec:
         guards=tuple(guards),
         replications=_num(v, "replications", "validation", 3, 1, 50, True),
         alpha=float(_num(v, "alpha", "validation", 0.05, 1e-9, 0.5)),
+        paired=paired,
     )
     if kind == "significance":
         # Baseline and candidate each get `replications` samples; the smallest p an exact

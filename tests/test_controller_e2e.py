@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
+from pathlib import Path
 
 from horizons.cli import main
 from horizons.controller import Controller
@@ -13,6 +14,17 @@ from horizons.template import load_topic
 from tests.helpers import EXAMPLES, TINY_EVALUATOR, TINY_TOPIC, TempDirCase, hyp, requires_docker
 
 BMAP = {"summary": "tiny map", "known_approaches": [], "gaps": [], "promising_directions": []}
+FIDELITY_OK = {"implements": True, "missing": ""}
+
+# Scales value() by a factor drawn from HORIZONS_SEED: absolute scores are noisy, paired ratios are exact.
+SEEDED_EVALUATOR = """
+import json, os, random, runpy
+MARKER = os.environ.pop("HORIZONS_RESULT_MARKER")
+scale = random.Random(int(os.environ["HORIZONS_SEED"])).uniform(0.5, 2.0)
+ns = runpy.run_path(os.environ["HORIZONS_CANDIDATE"])
+v = ns["value"]()
+print(MARKER + json.dumps({"score": v * scale, "correct": int(v > 0)}))
+"""
 
 
 def code(v: int) -> str:
@@ -29,7 +41,7 @@ class ControllerE2E(TempDirCase):
     def make_tiny(self, script: dict, topic_text: str = TINY_TOPIC):
         self.write("topic/baseline.py", "def value():\n    return 1\n")
         self.write("topic/evaluate.py", TINY_EVALUATOR)
-        self.write_json("topic/script.json", script)
+        self.write_json("topic/script.json", {"check_fidelity": [FIDELITY_OK], **script})
         self.write("topic/topic.toml", topic_text)
         return load_topic(self.topic / "topic.toml")
 
@@ -115,6 +127,66 @@ class ControllerE2E(TempDirCase):
                                                              | {"implement": [code(12)]}), resume=run2)
         self.assertEqual(status3, "success")
         self.assertGreater(kb3.get_run(run2)["budget"]["sandbox_runs"], spent)
+
+
+    def test_code_that_does_not_match_the_hypothesis_is_sent_back(self):
+        spec = self.make_tiny({"boundary_map": BMAP,
+                               "hypothesize": {"hypotheses": [hyp("Caching the answer in a lookup table reaches 12")]},
+                               "implement": [code(12), code(12)],
+                               "check_fidelity": [{"implements": False, "missing": "no lookup table is added"},
+                                                  FIDELITY_OK],
+                               "reflect": {"lessons": []}})
+        client = ScriptedClient.from_file(self.topic / "script.json")
+        run_id, status, kb = self.run_ctl(spec, client)
+        self.assertEqual(status, "success")
+        cands = [e for e in kb.experiments(run_id) if e["purpose"] == "candidate"]
+        self.assertEqual([e["status"] for e in cands], ["errored", "ok"])
+        self.assertIn("does not implement the hypothesis: no lookup table is added", cands[0]["error"])
+        self.assertIsNone(cands[0]["artifacts_dir"])  # rejected before anything ran in the sandbox
+        self.assertEqual(client.calls["check_fidelity"], 2)
+        h = kb.hypotheses(run_id)[0]
+        self.assertIs(h["outcome"]["fidelity"], True)
+        report = (self.ws / "runs" / run_id / "report.md").read_text()
+        self.assertIn("checked to implement the hypothesis", report)
+
+    def test_paired_mode_compares_each_run_with_the_baseline_on_the_same_seed(self):
+        spec = self.make_tiny({"boundary_map": BMAP,
+                               "hypothesize": {"hypotheses": [hyp("Returning three triples the score")]},
+                               "implement": code(3), "reflect": {"lessons": []}},
+                              TINY_TOPIC.replace("target = { absolute = 10 }", "target = { relative_to_baseline = 1.5 }")
+                              .replace("replications = 2", "replications = 3\npaired = true"))
+        self.write("topic/evaluate.py", SEEDED_EVALUATOR)
+        run_id, status, kb = self.run_ctl(spec, ScriptedClient.from_file(self.topic / "script.json"))
+        self.assertEqual(status, "success")
+        exps = kb.experiments(run_id)
+        purposes = [e["purpose"] for e in exps]
+        self.assertEqual(purposes.count("paired-baseline"), 3)
+        seeds = {}
+        for e in exps:
+            seed = Path(e["artifacts_dir"], "seed.txt").read_text()
+            seeds.setdefault(seed, []).append((e["purpose"], e["metrics"]["score"]))
+        pairs = [v for v in seeds.values() if len(v) == 2]
+        self.assertEqual(len(pairs), 3)  # each candidate/replication shares its seed with one baseline run
+        for pair in pairs:
+            got = dict(pair)
+            cand = got.get("candidate", got.get("replication"))
+            self.assertAlmostEqual(cand, 3 * got["paired-baseline"])
+        report = (self.ws / "runs" / run_id / "report.md").read_text()
+        self.assertIn("Paired comparison", report)
+
+    def test_paired_mode_skips_the_baseline_run_when_a_guard_fails(self):
+        spec = self.make_tiny({"boundary_map": BMAP,
+                               "hypothesize": {"hypotheses": [hyp("Returning three triples the score")]},
+                               "implement": [code(-1), code(3)], "reflect": {"lessons": []}},
+                              TINY_TOPIC.replace("target = { absolute = 10 }", "target = { relative_to_baseline = 1.5 }")
+                              .replace("replications = 2", "replications = 2\npaired = true"))
+        self.write("topic/evaluate.py", SEEDED_EVALUATOR)
+        run_id, status, kb = self.run_ctl(spec, ScriptedClient.from_file(self.topic / "script.json"))
+        self.assertEqual(status, "success")
+        purposes = [e["purpose"] for e in kb.experiments(run_id)]
+        # guard-failing candidate: no paired run; the fixed candidate and its replication: one each
+        self.assertEqual(purposes, ["baseline", "baseline", "candidate", "candidate", "paired-baseline",
+                                    "replication", "paired-baseline"])
 
 
 class DebugFlagTests(TempDirCase):

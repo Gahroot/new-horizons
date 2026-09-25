@@ -8,6 +8,13 @@ Outcome classes (kept distinct on purpose):
                  significant after Holm correction) -> PIVOT / gather more
   supported    - target met on every replication (and significant, if the
                  template asks for significance) -> breakthrough, STOP
+
+Paired mode ([validation] paired = true): each candidate run has a baseline run on
+the same seed. The target is checked per pair, the significance test uses the
+paired differences, and the reported value is seed-adjusted: the baseline mean
+times the average candidate/baseline ratio (plain differences when baseline values
+are not all positive). This removes the run-to-run noise of a randomised evaluator
+from the comparison.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ class Verdict:
     p_value: float | None = None
     p_adjusted: float | None = None
     ci: tuple[float, float] | None = None
+    paired_baselines: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)
@@ -94,30 +102,66 @@ def screen(spec: TopicSpec, status: str, metrics: dict[str, float], error: str,
     return "replicate", ""
 
 
+def paired_diffs(samples: list[float], refs: list[float], baseline_mean: float | None) -> list[float]:
+    """Per-seed effect of the candidate, in the metric's units at the baseline's average level.
+
+    With positive baseline values the effect is relative (candidate / baseline on that seed,
+    rescaled to the baseline mean), so a hard seed where every number is large cannot make
+    the same percentage gain look bigger. Otherwise it is the plain difference.
+    """
+    if baseline_mean is not None and baseline_mean > 0 and all(r > 0 for r in refs):
+        return [baseline_mean * (s / r - 1.0) for s, r in zip(samples, refs)]
+    return [s - r for s, r in zip(samples, refs)]
+
+
 def judge(spec: TopicSpec, runs: list[tuple[str, dict[str, float]]], baseline_samples: list[float],
-          best_value: float | None, prior_pvalues: list[float]) -> Verdict:
-    """Final verdict over the first run + replications. ``runs`` = [(status, metrics)]."""
+          best_value: float | None, prior_pvalues: list[float],
+          paired_baselines: list[float | None] | None = None) -> Verdict:
+    """Final verdict over the first run + replications. ``runs`` = [(status, metrics)].
+
+    ``paired_baselines`` (paired mode) holds the baseline's metric on the same seed as each run;
+    a missing pair makes that run invalid.
+    """
     v = spec.validation
     baseline_mean = stats.mean(baseline_samples) if baseline_samples else None
-    samples, all_guards, all_target = [], True, True
-    for status, m in runs:
+    paired = paired_baselines is not None
+    if paired and len(paired_baselines) != len(runs):
+        raise ValueError("paired_baselines must have one entry per run")
+    samples, refs, all_guards, all_target = [], [], True, True
+    for i, (status, m) in enumerate(runs):
         val = metric_value(v, m) if status == "ok" else None
-        if val is None:
+        ref = paired_baselines[i] if paired else baseline_mean
+        if val is None or (paired and ref is None):
             all_guards = all_target = False
             continue
         samples.append(val)
+        refs.append(ref)
         all_guards &= guards_ok(v, m)[0]
-        all_target &= meets_target(v, val, baseline_mean)
-    value = stats.mean(samples) if samples else None
+        all_target &= meets_target(v, val, ref)
+    diffs = paired_diffs(samples, refs, baseline_mean) if paired else []
+    if not samples:
+        value = None
+    elif paired and baseline_mean is not None:
+        value = baseline_mean + stats.mean(diffs)
+    else:
+        value = stats.mean(samples)
     verdict = Verdict("refuted", "", value=value, samples=samples, guards_ok=all_guards and bool(samples),
-                      target_met=all_target and len(samples) == len(runs) and bool(samples))
+                      target_met=all_target and len(samples) == len(runs) and bool(samples),
+                      paired_baselines=refs if paired else [])
     verdict.improved = bool(samples) and verdict.guards_ok and better(v, value, best_value)
-    if len(samples) >= 2 and len(baseline_samples) >= 2:
-        verdict.ci = stats.bootstrap_ci(samples, baseline_samples)
-    if baseline_samples and samples:
-        alt = "less" if v.direction == "minimize" else "greater"
-        verdict.p_value = stats.permutation_test(samples, baseline_samples, alternative=alt)
-        verdict.p_adjusted = stats.holm([*prior_pvalues, verdict.p_value])[-1]
+    alt = "less" if v.direction == "minimize" else "greater"
+    if paired:
+        if len(diffs) >= 2:
+            verdict.ci = stats.bootstrap_ci(diffs)
+        if diffs:
+            verdict.p_value = stats.paired_permutation_test(diffs, alternative=alt)
+            verdict.p_adjusted = stats.holm([*prior_pvalues, verdict.p_value])[-1]
+    else:
+        if len(samples) >= 2 and len(baseline_samples) >= 2:
+            verdict.ci = stats.bootstrap_ci(samples, baseline_samples)
+        if baseline_samples and samples:
+            verdict.p_value = stats.permutation_test(samples, baseline_samples, alternative=alt)
+            verdict.p_adjusted = stats.holm([*prior_pvalues, verdict.p_value])[-1]
 
     n, k = len(runs), len(samples)
     if not verdict.guards_ok or k < n:
@@ -140,11 +184,13 @@ def judge(spec: TopicSpec, runs: list[tuple[str, dict[str, float]]], baseline_sa
             verdict.outcome = "supported"
             verdict.reason = f"significant: Holm-adjusted p={verdict.p_adjusted:.4g} < {v.alpha} over {n} runs"
         return verdict
+    pair_note = " (each against the baseline on the same seed)" if paired else ""
     if verdict.target_met:
         verdict.outcome = "supported"
-        verdict.reason = f"target met on all {n} run(s)"
+        verdict.reason = f"target met on all {n} run(s){pair_note}"
     else:
-        met = sum(meets_target(v, s, baseline_mean) for s in samples)
+        met = sum(meets_target(v, s, r) for s, r in zip(samples, refs))
         verdict.outcome = "inconclusive" if met else "refuted"
-        verdict.reason = f"target met on {met}/{n} runs - did not replicate" if met else "target missed"
+        verdict.reason = (f"target met on {met}/{n} runs{pair_note} - did not replicate" if met
+                          else f"target missed{pair_note}")
     return verdict
